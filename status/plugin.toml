@@ -1,0 +1,39 @@
+id = "status"
+name = "Status"
+worker = "Worker.ts"
+
+[[panels]]
+id = "status"
+entry = "Status.tsx"
+title = "Status"
+
+[[views]]
+id = "diff"
+entry = "Diff.tsx"
+title = "Diff"
+
+[[commands]]
+id = "show_diff"
+title = "Status: Show diff"
+rpc = "open_diff"
+shortcut = "primary-r"
+
+[[rpc]]
+name = "open_diff"
+description = "open an instance diff — payload: {placement?: 'tab' | 'split-right' | 'split-down', command?: string[]}; command runs as argv in the instance and must emit a git-format patch"
+
+[[rpc]]
+name = "list_comments"
+description = "list saved local diff comment threads for an instance, oldest first, including replies and line ranges — requires --instance <project>/<instance>"
+
+[[rpc]]
+name = "resolve_comment"
+description = "mark a saved local diff comment resolved — requires --instance <project>/<instance>; payload: {id}"
+
+[[rpc]]
+name = "reply_comment"
+description = "reply to a saved local diff comment — requires --instance <project>/<instance>; payload: {id, body}"
+
+[[rpc]]
+name = "refresh_diff"
+description = "refresh one open diff view — target is the view id; payload: {command?: string[], vcs?: 'git' | 'jj'}"

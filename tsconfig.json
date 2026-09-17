@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": false,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "paths": {
+      "@/*": ["./*"],
+      "bigband/host": ["./types/host"],
+      "bigband/db": ["./types/db"],
+      "bigband/vcs": ["./types/vcs"],
+      "bigband/panel": ["./types/panel"],
+      "bigband/theme": ["./types/theme"],
+      "bigband/ui": ["./types/ui"],
+      "bigband/utils": ["./types/utils"]
+    }
+  },
+  "include": ["**/*.ts", "**/*.tsx", "types/*.d.ts"]
+}
