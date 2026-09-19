@@ -490,7 +490,7 @@ function CommentAnnotationView({ annotation, onDelete }: {
 }
 
 export default function Diff() {
-  const codeViewRef = useRef<CodeViewHandle<CommentAnnotation, undefined>>(null);
+  const codeViewRef = useRef<CodeViewHandle<CommentAnnotation>>(null);
   const bigbandTheme = useTheme();
   const [diffTheme, setDiffTheme] = useState(INITIAL_DIFF_THEME);
   useEffect(() => {

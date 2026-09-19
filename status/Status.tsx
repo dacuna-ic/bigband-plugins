@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Copy, ExternalLink, FileText, GitCompare, RotateCcw } from 'lucide-react';
@@ -74,6 +74,13 @@ function parseStatus(vcs, stdout) {
   return vcs === 'jj' ? parseJjSummary(stdout) : parseGitStatus(stdout);
 }
 
+function parseDiffStat(stdout) {
+  const summary = stdout.trim().split('\n').at(-1) ?? '';
+  const additions = Number(summary.match(/(\d+) insertion(?:s)?\(\+\)/)?.[1] ?? 0);
+  const deletions = Number(summary.match(/(\d+) deletion(?:s)?\(-\)/)?.[1] ?? 0);
+  return { additions, deletions };
+}
+
 const STATUS_COLOR = {
   M: 'var(--bb-warning)',
   A: 'var(--bb-success)',
@@ -122,19 +129,37 @@ async function findInstancePath(instance) {
 }
 
 export default function Status() {
-  const { instance, vcs } = usePanel();
+  const { instance, vcs, updateTitle } = usePanel();
   const [actionError, setActionError] = useState(null);
 
   const statusQ = useQuery({
     queryKey: ['instance', instance, 'status', vcs],
     queryFn: async () => {
-      const { stdout, stderr, exit } = await exec(instance, statusCommand(vcs));
-      if (exit !== 0) throw new Error(stderr.trim() || `status exited ${exit}`);
-      return parseStatus(vcs, stdout);
+      const [{ stdout: statusStdout, stderr: statusStderr, exit: statusExit }, { stdout: statStdout, stderr: statStderr, exit: statExit }] = await Promise.all([
+        exec(instance, statusCommand(vcs)),
+        exec(instance, vcs === 'jj' ? ['jj', 'diff', '--stat'] : ['git', 'diff', 'HEAD', '--stat']),
+      ]);
+      if (statusExit !== 0) throw new Error(statusStderr.trim() || `status exited ${statusExit}`);
+      if (statExit !== 0) throw new Error(statStderr.trim() || `diff stat exited ${statExit}`);
+      return { entries: parseStatus(vcs, statusStdout), ...parseDiffStat(statStdout) };
     },
     enabled: !!instance,
   });
-  const { data: entries = [], isLoading, error, refetch } = statusQ;
+  const { data: status = { entries: [], additions: 0, deletions: 0 }, isLoading, error, refetch } = statusQ;
+  const { entries, additions, deletions } = status;
+
+  useEffect(() => {
+    if (!instance || isLoading || error) {
+      updateTitle(null);
+      return;
+    }
+    updateTitle(
+      <>
+        Status - <span style={{ color: 'var(--bb-success)' }}>+{additions}</span>{' '}
+        <span style={{ color: 'var(--bb-danger)' }}>-{deletions}</span>
+      </>,
+    );
+  }, [additions, deletions, error, instance, isLoading, updateTitle]);
 
   const openInEditor = async (entry) => {
     setActionError(null);

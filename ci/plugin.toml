@@ -1,0 +1,20 @@
+id = "ci"
+name = "CI"
+
+[[panels]]
+id = "ci"
+entry = "Ci.tsx"
+title = "CI"
+
+[[rpc]]
+name = "failed_job_excerpts"
+description = "return focused excerpts for failed jobs; payload: {pipeline, build_number, max_tokens?}"
+
+[[rpc]]
+name = "artifact_preview"
+description = "return a bounded tail of a text artifact using authenticated Buildkite access; payload: {pipeline, build_number, artifact_id, max_bytes?}"
+
+
+[[rpc]]
+name = "retry_failed_jobs"
+description = "retry all failed jobs in a build; payload: {pipeline, build_number}"
