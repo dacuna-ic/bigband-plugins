@@ -6,10 +6,13 @@ import appleEmojiEntries from 'https://esm.sh/@buildkite/emojis@2.0.1009/img-app
 
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { control, exec, registerRPC } from 'bigband/host';
-import { usePanel } from 'bigband/panel';
+import { useHostEvent, usePanel } from 'bigband/panel';
 import { nearestBookmark } from 'bigband/vcs';
 import { Badge, Button, Tooltip, TooltipContent, TooltipTrigger } from 'bigband/ui';
 import { toast } from 'bigband/utils';
+import { Table } from 'surrealdb';
+import { useCollection } from 'bigband/db';
+import type { Pr as PrRow } from '../types/generated/index.ts';
 import {
   CircleCheck, Loader, CircleX, CircleSlash, Clock, CirclePause, CircleMinus,
   Circle, RefreshCw, RotateCcw, ExternalLink, ChevronDown, ChevronUp, Terminal, Copy, Check, Sparkles,
@@ -17,6 +20,20 @@ import {
 
 const POLL_MS = 10_000;
 const CACHE_MS = 30 * 60_000;
+
+const PR = new Table('pr');
+const PR_QUERY = "SELECT number, title, url, head_ref, checks_state FROM pr WHERE repo = $repo AND state = 'OPEN' ORDER BY number DESC";
+type CiPr = Pick<PrRow, 'number' | 'title' | 'url' | 'head_ref' | 'checks_state'>;
+
+function stackPrs(bookmarks: string[], rows: CiPr[]): CiPr[] {
+  const seen = new Set<number>();
+  return bookmarks.flatMap(bookmark => {
+    const pr = rows.find(row => row.head_ref === bookmark);
+    if (!pr || seen.has(pr.number)) return [];
+    seen.add(pr.number);
+    return [pr];
+  });
+}
 
 const AI_GATEWAY = 'https://aigateway.instacart.tools/unified/dacuna-ic/v1/chat/completions';
 const AI_MODEL = 'gpt-4o-mini-2024-07-18';
@@ -461,10 +478,17 @@ function PlaceholderCard({ children, onRefresh = null }: { children: any; onRefr
 
 // --- query fns (pure async, no hooks) ---
 
-async function fetchMeta(instance, vcs) {
-  const branch = await currentBranch(instance, vcs).catch(() => null);
-  const pipelines = await resolvePipelines(instance, vcs, branch);
-  return { pipelines, branch: branch ?? null };
+async function fetchContext(instance, vcs) {
+  if (vcs !== 'jj') return { repo: '', bookmarks: [], branch: await currentBranch(instance, vcs) };
+  const [remoteUrl, log] = await Promise.all([
+    getRemoteUrl(instance, vcs),
+    exec(instance, ['jj', 'log', '-r', 'reachable(@, mutable())', '--no-graph', '--color', 'never',
+      '-T', 'local_bookmarks.map(|b| b.name()).join("\\n") ++ "\\n"']),
+  ]);
+  if (log.exit !== 0) throw new Error(log.stderr.trim() || `jj exited ${log.exit}`);
+  const repo = remoteUrl?.match(/github\.com[/:]([^/]+\/[^/.]+?)(?:\.git)?$/)?.[1] || '';
+  const bookmarks = [...new Set(log.stdout.split('\n').map(name => name.trim()).filter(Boolean))];
+  return { repo, bookmarks, branch: null };
 }
 
 async function fetchBuilds(instance, pipelines, branch) {
@@ -913,10 +937,6 @@ function PipelineCard({ instance, pipeline, build, branch, onRefresh, isFetching
         padding: '8px 10px',
         borderBottom: jobs.length > 0 ? '1px solid #313244' : 'none',
       }}>
-        <div style={{
-          color: 'var(--bb-muted)', fontSize: '10px', fontFamily: 'ui-monospace,monospace',
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: '6px',
-        }} title={pipeline}>{pipeline}</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: '6px' }}>
             <StateIcon state={build.state} size={14} />
@@ -1088,20 +1108,18 @@ function PipelineCard({ instance, pipeline, build, branch, onRefresh, isFetching
   );
 }
 
-export default function Ci() {
-  const { instance, vcs } = usePanel();
+function BranchCi({ instance, vcs, branch }) {
 
   const metaQ = useQuery({
-    queryKey: ['instance', instance, 'ci', 'meta', vcs],
-    queryFn: () => fetchMeta(instance, vcs),
+    queryKey: ['instance', instance, 'ci', 'meta', vcs, branch],
+    queryFn: () => resolvePipelines(instance, vcs, branch),
     enabled: !!instance,
     staleTime: 60_000,
     gcTime: CACHE_MS,
     refetchOnMount: 'always',
   });
 
-  const pipelines = metaQ.data?.pipelines ?? [];
-  const branch = metaQ.data?.branch ?? null;
+  const pipelines = metaQ.data ?? [];
 
   const buildQ = useQuery({
     queryKey: ['instance', instance, 'ci', 'builds', pipelines, branch],
@@ -1111,6 +1129,8 @@ export default function Ci() {
     gcTime: CACHE_MS,
     refetchOnMount: 'always',
   });
+
+  useHostEvent('instance.changed', () => { metaQ.refetch(); buildQ.refetch(); }, { debounce: 750 });
 
   const builds = buildQ.data ?? [];
 
@@ -1188,6 +1208,51 @@ export default function Ci() {
           onRefresh={() => buildQ.refetch()}
           isFetching={buildQ.isFetching}
         />
+      ))}
+    </div>
+  );
+}
+
+export default function Ci() {
+  const { instance, vcs } = usePanel();
+  const contextQ = useQuery({
+    queryKey: ['instance', instance, 'ci', 'context', vcs],
+    queryFn: () => fetchContext(instance, vcs),
+    enabled: !!instance,
+    gcTime: CACHE_MS,
+    refetchOnMount: 'always',
+  });
+  const { rows, error } = useCollection<CiPr>(PR, PR_QUERY, {
+    vars: { repo: contextQ.data?.repo || '' },
+  });
+  useHostEvent('instance.changed', () => { contextQ.refetch(); }, { debounce: 750 });
+
+  if (!instance) return null;
+  if (contextQ.isPending) return <PlaceholderCard>loading…</PlaceholderCard>;
+  if (contextQ.isError) return <PlaceholderCard onRefresh={() => contextQ.refetch()}>{contextQ.error.message}</PlaceholderCard>;
+  if (vcs !== 'jj') return <BranchCi instance={instance} vcs={vcs} branch={contextQ.data.branch} />;
+  if (error) return <PlaceholderCard>{error}</PlaceholderCard>;
+  if (!rows) return <PlaceholderCard>loading PRs…</PlaceholderCard>;
+
+  const prs = stackPrs(contextQ.data.bookmarks, rows);
+  if (!prs.length) return <PlaceholderCard>No open PRs found for this stack.</PlaceholderCard>;
+  return (
+    <div style={{ fontFamily: '-apple-system,BlinkMacSystemFont,sans-serif' }}>
+      {prs.map(pr => (
+        <section key={`${contextQ.data.repo}#${pr.number}`} style={{ borderBottom: '1px solid var(--bb-border)' }}>
+          <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <a href={pr.url} target="_blank" rel="noreferrer" style={{ color: 'var(--bb-foreground)', fontSize: '11px', textDecoration: 'none' }}>
+              #{pr.number} {pr.title}
+            </a>
+            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px', fontSize: '10px', color: 'var(--bb-muted)' }}>
+              <span style={{ overflowWrap: 'anywhere', fontFamily: 'ui-monospace,monospace' }}>{pr.head_ref}</span>
+              <Badge variant="outline" title="Aggregate PR checks, not Buildkite-only" style={{ fontSize: '10px', flexShrink: 0 }}>
+                {pr.checks_state ? `checks: ${pr.checks_state.toLowerCase()}` : 'no checks'}
+              </Badge>
+            </div>
+          </div>
+          <BranchCi instance={instance} vcs={vcs} branch={pr.head_ref} />
+        </section>
       ))}
     </div>
   );

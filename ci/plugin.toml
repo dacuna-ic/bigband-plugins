@@ -1,6 +1,14 @@
 id = "ci"
 name = "CI"
 
+# JJ: one CI item per open PR matched by repo + local bookmark within
+# reachable(@, mutable()), the same connected stack used by the Stack panel.
+# Shared pr rows provide identity and aggregate check status; Buildkite details
+# are fetched independently for each open PR's head_ref. Closed and merged PRs
+# have no CI item. The newest open PR wins if a bookmark has been reused.
+# Unbookmarked changes have no PR item. Git instances keep their current-branch Buildkite view.
+# Build cards omit the redundant standalone pipeline/repo heading.
+
 [[panels]]
 id = "ci"
 entry = "Ci.tsx"

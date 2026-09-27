@@ -1,5 +1,74 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { css } from 'goober';
 import { Button, Textarea } from 'bigband/ui';
+
+// Installed plugins are outside the host's Tailwind source scan. Keep comment
+// layout here; shared Button/Textarea components still use the host's own CSS.
+const commentClass = css`
+  margin: 10px;
+  width: calc(100% - 20px);
+  max-width: 95%;
+  white-space: normal;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: clamp(9px, calc(var(--bb-ui-font-size, 15px) * 0.73), 18px);
+  line-height: 1.5;
+  color: var(--bb-foreground);
+
+  @media (min-width: 640px) { max-width: 70%; }
+
+  & .comment-card {
+    box-sizing: border-box;
+    border: 1px solid var(--bb-border);
+    border-radius: 10px;
+    background: var(--bb-background);
+    padding: 12px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+  }
+  & .comment-message { display: flex; gap: 8px; padding: 8px 0; }
+  & .comment-message:first-child { padding-top: 0; }
+  & .comment-message:last-child { padding-bottom: 0; }
+  & .comment-compose { display: flex; gap: 8px; }
+  & .comment-avatar {
+    display: flex;
+    width: 24px;
+    height: 24px;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: var(--bb-secondary);
+    font-size: 0.85em;
+    font-weight: 600;
+  }
+  & .comment-content { min-width: 0; flex: 1; }
+  & .comment-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+  & .comment-author { font-weight: 600; }
+  & .comment-time, & .comment-location { font-size: 0.85em; color: var(--bb-muted); }
+  & .comment-location { margin-bottom: 4px; overflow-wrap: anywhere; }
+  & .comment-body { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.625; }
+  & .comment-link { display: inline-block; margin-top: 4px; font-size: 0.85em; color: var(--bb-accent); }
+  & .comment-link:hover { text-decoration: underline; }
+  & .comment-replies { margin-left: 32px; border-top: 1px solid var(--bb-border); padding-top: 8px; }
+  & .comment-replies > .comment-message + .comment-message { border-top: 1px solid var(--bb-border); }
+  & .comment-reply-form { margin: 8px 0 0 32px; }
+  & .comment-input { width: 100%; min-height: 64px; resize: none; font: inherit; }
+  & .comment-reply-form .comment-input { min-height: 56px; }
+  & .comment-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+  & .comment-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 16px;
+    margin: 8px 0 0 32px;
+    border-top: 1px solid var(--bb-border);
+    padding-top: 8px;
+    font-size: 0.85em;
+  }
+  & .comment-actions button { padding: 0; border: 0; background: transparent; color: var(--bb-accent); font: inherit; cursor: pointer; }
+  & .comment-actions button:hover { text-decoration: underline; }
+  & .comment-actions button:disabled { opacity: 0.5; cursor: default; }
+  & .comment-actions .comment-delete { color: var(--bb-danger); }
+`;
 
 interface CommentFormProps {
   location: string;
@@ -39,26 +108,26 @@ export function CommentForm({
   }, [onCancel, submitting]);
 
   return (
-    <div className="flex overflow-hidden">
-      <div className="m-2.5 w-full max-w-[95%] font-sans sm:max-w-[70%]">
+    <div style={{ display: 'flex', overflow: 'hidden' }}>
+      <div className={commentClass}>
         <form
-          className="rounded-lg border bg-card p-3 shadow-[0_2px_4px_rgba(0,0,0,0.05)]"
+          className="comment-card"
           onSubmit={(event) => {
             event.preventDefault();
             void submit(onSave);
           }}
         >
-          <div className="flex gap-2">
-            <div className="flex size-6 shrink-0 items-center justify-center rounded-full bg-secondary text-[0.7rem] font-semibold text-secondary-foreground">
+          <div className="comment-compose">
+            <div className="comment-avatar">
               Y
             </div>
-            <div className="min-w-0 flex-1">
-              <div className="mb-1 text-xs text-muted-foreground">{location}</div>
+            <div className="comment-content">
+              <div className="comment-location">{location}</div>
               <Textarea
                 ref={textareaRef}
                 aria-label="Leave a comment"
                 placeholder="Leave a comment…"
-                className="min-h-16 resize-none text-sm"
+                className="comment-input"
                 disabled={submitting}
                 onKeyDown={(event) => {
                   if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
@@ -69,7 +138,7 @@ export function CommentForm({
                   }
                 }}
               />
-              <div className="mt-2 flex items-center gap-2">
+              <div className="comment-buttons">
                 <Button type="submit" size="sm" disabled={submitting}>Save local</Button>
                 {canPublish && (
                   <Button
@@ -124,19 +193,19 @@ function ThreadMessage({ author, body, createdAt, source, url }: {
 }) {
   const initial = author.trim().charAt(0).toUpperCase() || '?';
   return (
-    <div className="flex gap-2 py-2 first:pt-0 last:pb-0">
-      <div className="flex size-6 shrink-0 items-center justify-center rounded-full bg-secondary text-[0.7rem] font-semibold text-secondary-foreground">
+    <div className="comment-message">
+      <div className="comment-avatar">
         {initial}
       </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <span className="font-semibold text-foreground">{author}</span>
-          <span className="text-xs text-muted-foreground">
+      <div className="comment-content">
+        <div className="comment-meta">
+          <span className="comment-author">{author}</span>
+          <span className="comment-time">
             {createdAt ? new Date(createdAt).toLocaleString() : source === 'local' ? 'Local note' : 'GitHub'}
           </span>
         </div>
-        <p className="mt-1 whitespace-pre-wrap break-words leading-relaxed text-foreground">{body}</p>
-        {url && <a href={url} className="mt-1 inline-block text-xs text-primary hover:underline">View on GitHub</a>}
+        <p className="comment-body">{body}</p>
+        {url && <a href={url} className="comment-link">View on GitHub</a>}
       </div>
     </div>
   );
@@ -186,12 +255,12 @@ export function CommentThread({
   }, [onResolve, resolving]);
 
   return (
-    <div className="m-2.5 max-w-[95%] whitespace-normal font-sans sm:max-w-[70%]">
-      <div className="rounded-lg border bg-card p-3 shadow-[0_2px_4px_rgba(0,0,0,0.05)]">
-        <div className="mb-1 text-xs text-muted-foreground">{location}</div>
+    <div className={commentClass}>
+      <div className="comment-card">
+        <div className="comment-location">{location}</div>
         <ThreadMessage author={author} body={body} createdAt={createdAt} source={source} url={url} />
         {replies.length > 0 && (
-          <div className="ml-8 divide-y border-t pt-2">
+          <div className="comment-replies">
             {replies.map((reply) => (
               <ThreadMessage
                 key={reply.id}
@@ -205,12 +274,12 @@ export function CommentThread({
           </div>
         )}
         {replying && (
-          <div className="mt-2 ml-8">
+          <div className="comment-reply-form">
             <Textarea
               ref={replyRef}
               aria-label="Reply to comment"
               placeholder="Write a reply…"
-              className="min-h-14 resize-none text-sm"
+              className="comment-input"
               disabled={submitting}
               onKeyDown={(event) => {
                 if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
@@ -221,23 +290,23 @@ export function CommentThread({
                 }
               }}
             />
-            <div className="mt-2 flex gap-2">
+            <div className="comment-buttons">
               <Button type="button" size="sm" disabled={submitting} onClick={() => void submitReply()}>Reply</Button>
               <Button type="button" size="sm" variant="outline" disabled={submitting} onClick={() => setReplying(false)}>Cancel</Button>
             </div>
           </div>
         )}
-        <div className="mt-2 ml-8 flex items-center gap-4 border-t pt-2 text-xs">
-          <button type="button" className="text-primary hover:underline" onClick={() => setReplying((open) => !open)}>
+        <div className="comment-actions">
+          <button type="button" onClick={() => setReplying((open) => !open)}>
             {replying ? 'Close reply' : 'Reply'}
           </button>
           {onResolve && (
-            <button type="button" className="text-primary hover:underline disabled:opacity-50" disabled={resolving} onClick={() => void resolve()}>
+            <button type="button" disabled={resolving} onClick={() => void resolve()}>
               {resolving ? 'Resolving…' : 'Resolve'}
             </button>
           )}
           {onDelete && (
-            <button type="button" className="text-destructive hover:underline" onClick={onDelete}>Delete</button>
+            <button type="button" className="comment-delete" onClick={onDelete}>Delete</button>
           )}
         </div>
       </div>

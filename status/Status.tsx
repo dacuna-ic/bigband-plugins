@@ -37,6 +37,16 @@ function discardCommand(vcs, entry) {
   return ['git', 'restore', '--source=HEAD', '--staged', '--worktree', '--', ...paths];
 }
 
+const GIT_CONFLICT_CODES: Record<string, true> = {
+  DD: true,
+  AU: true,
+  UD: true,
+  UA: true,
+  DU: true,
+  AA: true,
+  UU: true,
+};
+
 function parseGitStatus(stdout) {
   return stdout
     .split('\n')
@@ -46,9 +56,10 @@ function parseGitStatus(stdout) {
       const rawPath = raw.slice(3);
       const rename = rawPath.match(/^(.*) -> (.*)$/);
       const status = ['??', 'A', 'D', 'R', 'M'].find(c => code.includes(c))?.[0] ?? code.trim()[0] ?? '?';
+      const conflicted = GIT_CONFLICT_CODES[code] === true;
       return rename
-        ? { status, originalPath: rename[1], path: rename[2] }
-        : { status, path: rawPath };
+        ? { status, conflicted, originalPath: rename[1], path: rename[2] }
+        : { status, conflicted, path: rawPath };
     });
 }
 
@@ -62,16 +73,35 @@ function parseJjPath(path) {
   };
 }
 
-function parseJjSummary(stdout) {
-  return stdout
-    .split('\n')
-    .map((raw) => raw.match(/^([MADRC])\s+(.+)$/))
-    .filter((m) => m !== null)
-    .map((m) => ({ status: m[1], ...parseJjPath(m[2]) }));
+function parseJjConflicts(stdout) {
+  return new Set(
+    stdout
+      .split('\n')
+      .map((raw) => raw.match(/^(.*?)\s+\d+-sided conflict(?:\s+.*)?$/))
+      .filter((match) => match !== null)
+      .map((match) => match[1]),
+  );
 }
 
-function parseStatus(vcs, stdout) {
-  return vcs === 'jj' ? parseJjSummary(stdout) : parseGitStatus(stdout);
+function parseJjSummary(stdout, conflictStdout = '') {
+  const conflicts = parseJjConflicts(conflictStdout);
+  const entries = stdout
+    .split('\n')
+    .map((raw) => raw.match(/^([MADRC])\s+(.+)$/))
+    .filter((match) => match !== null)
+    .map((match) => {
+      const parsedPath = parseJjPath(match[2]);
+      return { status: match[1], ...parsedPath, conflicted: conflicts.has(parsedPath.path) };
+    });
+  const seen = new Set(entries.map((entry) => entry.path));
+  for (const path of conflicts) {
+    if (!seen.has(path)) entries.push({ status: 'M', path, conflicted: true });
+  }
+  return entries;
+}
+
+function parseStatus(vcs, stdout, conflictStdout = '') {
+  return vcs === 'jj' ? parseJjSummary(stdout, conflictStdout) : parseGitStatus(stdout);
 }
 
 function parseDiffStat(stdout) {
@@ -87,6 +117,7 @@ const STATUS_COLOR = {
   D: 'var(--bb-danger)',
   R: 'var(--bb-accent)',
   C: 'var(--bb-accent)',
+  '!': 'var(--bb-danger)',
   '?': 'var(--bb-muted)',
 };
 
@@ -135,13 +166,25 @@ export default function Status() {
   const statusQ = useQuery({
     queryKey: ['instance', instance, 'status', vcs],
     queryFn: async () => {
-      const [{ stdout: statusStdout, stderr: statusStderr, exit: statusExit }, { stdout: statStdout, stderr: statStderr, exit: statExit }] = await Promise.all([
+      const [statusResult, statResult, conflictsResult] = await Promise.all([
         exec(instance, statusCommand(vcs)),
         exec(instance, vcs === 'jj' ? ['jj', 'diff', '--stat'] : ['git', 'diff', 'HEAD', '--stat']),
+        vcs === 'jj' ? exec(instance, ['jj', 'resolve', '--list']) : null,
       ]);
-      if (statusExit !== 0) throw new Error(statusStderr.trim() || `status exited ${statusExit}`);
-      if (statExit !== 0) throw new Error(statStderr.trim() || `diff stat exited ${statExit}`);
-      return { entries: parseStatus(vcs, statusStdout), ...parseDiffStat(statStdout) };
+      if (statusResult.exit !== 0) throw new Error(statusResult.stderr.trim() || `status exited ${statusResult.exit}`);
+      if (statResult.exit !== 0) throw new Error(statResult.stderr.trim() || `diff stat exited ${statResult.exit}`);
+      // `jj resolve --list` exits 2 when the revision has no conflicts.
+      if (
+        conflictsResult &&
+        conflictsResult.exit !== 0 &&
+        !(conflictsResult.exit === 2 && conflictsResult.stderr.trim().endsWith('No conflicts found at this revision'))
+      ) {
+        throw new Error(conflictsResult.stderr.trim() || `conflict list exited ${conflictsResult.exit}`);
+      }
+      return {
+        entries: parseStatus(vcs, statusResult.stdout, conflictsResult?.stdout ?? ''),
+        ...parseDiffStat(statResult.stdout),
+      };
     },
     enabled: !!instance,
   });
@@ -233,14 +276,21 @@ export default function Status() {
       {!error && !isLoading && n === 0 && <div style={styles.empty}>working tree clean</div>}
       {entries.map((e) => (
         <ContextMenu key={e.path}>
-          <ContextMenuTrigger style={styles.row} title={e.path}>
-            <span style={{ ...styles.status, color: STATUS_COLOR[e.status] || 'var(--bb-muted)' }}>{e.status}</span>
+          <ContextMenuTrigger style={styles.row} title={e.conflicted ? `Conflicted: ${e.path}` : e.path}>
+            <span
+              aria-label={e.conflicted ? 'Conflicted file' : `Status ${e.status}`}
+              style={{ ...styles.status, color: STATUS_COLOR[e.conflicted ? '!' : e.status] || 'var(--bb-muted)' }}
+            >{e.conflicted ? '!' : e.status}</span>
             <button
               type="button"
-              style={styles.pathButton}
-              title={`Open diff for ${e.path}; hold Cmd to open in editor`}
-              aria-label={`Open diff for ${e.path}`}
-              onClick={(event) => void (event.metaKey ? openInEditor(e) : open(e, true))}
+              style={e.conflicted ? { ...styles.pathButton, color: STATUS_COLOR['!'] } : styles.pathButton}
+              title={vcs === 'jj' && e.conflicted ? `Open conflict file ${e.path}; hold Cmd to open in editor` : `Open diff for ${e.path}; hold Cmd to open in editor`}
+              aria-label={vcs === 'jj' && e.conflicted ? `Open conflicted file ${e.path}` : `Open diff for ${e.path}`}
+              onClick={(event) => {
+                if (event.metaKey) void openInEditor(e);
+                else if (vcs === 'jj' && e.conflicted) void open(e);
+                else void open(e, true);
+              }}
             >{e.path}</button>
           </ContextMenuTrigger>
           <ContextMenuContent>
@@ -253,7 +303,7 @@ export default function Status() {
               Copy path
             </ContextMenuItem>
             <ContextMenuSeparator />
-            <ContextMenuItem onClick={() => void open(e, true)}>
+            <ContextMenuItem disabled={vcs === 'jj' && e.conflicted} onClick={() => void open(e, true)}>
               <GitCompare size={14} />
               View diff
             </ContextMenuItem>
