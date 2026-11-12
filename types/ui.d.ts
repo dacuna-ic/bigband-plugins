@@ -6,6 +6,7 @@ export * from "./ui/context-menu.tsx";
 export * from "./ui/input.tsx";
 export * from "./ui/label.tsx";
 export * from "./ui/separator.tsx";
+export * from "./ui/select.tsx";
 export * from "./ui/skeleton.tsx";
 export * from "./ui/textarea.tsx";
 export * from "./ui/tooltip.tsx";

@@ -62,6 +62,8 @@ example.
 ```toml
 id = "myplugin"          # unique; matches the directory name
 name = "My Plugin"       # display name
+runtime_api = 2          # required by the workspace-aware runtime
+requirements = []        # directory-safe; alternatively repository/project/managed_instance
 
 # Optional background module. It runs for module-level side effects and does
 # not need a panel or a [wells] assignment.
@@ -77,6 +79,14 @@ title = "My Plugin"      # optional; rendered as panel chrome header
 name = "do-thing"
 description = "payload: {arg}"
 ```
+
+A manifest without `runtime_api = 2` is rejected as upgrade-required. An
+omitted `requirements` array keeps the legacy project-only scope; `[]` opts
+into directory-safe folder/scratch contexts, while `repository`, `project`, and
+`managed_instance` gate panels and workers before mounting. Requirements are
+eligibility, not a sandbox. The maintained `status` and `ci` plugins are
+deliberately project-scoped to preserve their existing instance/repository-keyed
+data; they do not claim folder or scratch support.
 
 Panels do not choose their own well. Enable and order panel plugins in
 `~/.bigband/config.toml`:
@@ -154,7 +164,11 @@ npm run runtime-css
 - **`bigband/utils`** — shared plugin helpers: `cn` for composing class names and
   `toast(message, options?)` for displaying a native Bigband toast.
 - **`bigband/host`** — `registerRPC(name, handler)`, `on(event, cb)`,
-  `exec(instance, argv)`, `openFile(instance, path)`, `instances()`.
+  `exec(workspaceId, argv)`, `execStream(workspaceId, argv)`,
+  `openFile(workspaceId, path)`, `openEditor(path, workspaceId?)`,
+  `openView(plugin, view, workspaceId, args?, placement?)`,
+  `workspaces()`, and `updateTitle(title?)`. Workspace IDs are opaque; never
+  derive a root from one.
 - **`bigband/db`** — an already-connected SurrealDB handle,
   `surrealDBAddress`, `surrealDBConnection`, and
   `useCollection(table, sql, opts?)`. The connection object includes
@@ -210,8 +224,10 @@ npm run typegen
 The task gets the app's ephemeral database credentials from `bigband surrealdb
 address` and invokes `surrealkit typegen` with database-level authentication.
 `surrealkit.toml` writes `types/generated/index.ts`; the shared `.gitignore`
-keeps that generated directory uncommitted. Install `surrealkit` separately and
-keep it on `PATH`.
+keeps that generated directory uncommitted. Keep a SurrealDB-3-compatible
+`surrealkit` on `PATH`; `1.0.0-beta.7` is verified against Bigband's embedded
+SurrealDB 3.2.4. SurrealKit `1.0.0-rc.1` requires SurrealDB 4 and cannot generate
+types from this runtime.
 
 ```tsx
 import { Table } from 'surrealdb';
@@ -261,44 +277,49 @@ registerRPC('add', async ({ title } = {}) => {
 });
 ```
 
-### Instance removal lifecycle
+### Workspace lifecycle and data scope
 
-Subscribe from a worker or panel with the typed `onLifecycleEvent` API:
+The maintained host does not dispatch a legacy `instance.removed` lifecycle
+event, so do not build comment/record cleanup on it. Closing a workspace is
+non-destructive: `workspace.closed` stops workspace-scoped subscriptions but
+plugin data must remain. `workspace.discarded` is separate and follows a
+confirmed scratch deletion. Core owns process and watcher teardown; plugin
+callbacks are not responsible for making closure safe.
 
-```ts
-import { onLifecycleEvent } from 'bigband/host';
+`selection.workspace` and `viewContext().workspace` contain the authoritative
+descriptor: opaque `workspace_id`, immutable `root`, optional real `project`
+and `repository`, capabilities, availability, and terminal identity. Use
+`exec(workspace.workspace_id, argv)` for fixed-root execution; shell `cd` does
+not retarget it. `selection.vcs` is nullable. A folder inside a repository keeps
+its selected subdirectory as `root`, while `repository.root` identifies the
+enclosing repository.
 
-onLifecycleEvent('instance.removed', async ({ instance }) => {
-  await db.query('DELETE plugin_record WHERE instance = $instance', { instance });
-});
-```
+Key new workspace-scoped records and query caches by `workspace_id`, never by a
+basename, path, terminal title, or invented `<project>/<instance>`. Existing
+project-slug records require an explicit versioned migration; without one,
+retain them as deliberately project-only. Renaming an event or storage field is
+not a migration. The maintained `status` plugin keeps `diff_comment.instance`
+keyed by the genuine project slug for exactly this reason. Other installed
+plugins are external code; this repository does not migrate or rewrite them.
 
-`instance` is the project-qualified `"<project>/<instance>"` identity. The host
-emits this event after the working copy and every associated terminal daemon
-are gone. It awaits all subscribers with a timeout. Failures are logged with
-the owning plugin id but cannot restore an already-removed working copy or
-prevent other subscribers from running. Prefer a `worker` subscription when
-cleanup must be available regardless of which panels the user enables.
-
-Dynamic views can expose one independently addressable handler per opening.
-Use the view's stable id as the optional registration target:
+Dynamic views can still pass the view's stable id as an optional registration
+target:
 
 ```ts
 const view = viewContext();
 registerRPC('refresh', refresh, view.id);
 ```
 
-`plugin.rpc.list` includes the currently live `targets` for each method.
-Select one with `--target` (or `params.target` over IPC):
-
-```sh
-bigband rpc exec myplugin.refresh --target <view-id> '{"mode":"compact"}'
-```
+This build acknowledges targeted registrations but does not implement general
+targeted dynamic-view RPC routing, so do not treat them as a delivery
+guarantee. Registering the same untargeted method from multiple live surfaces
+still has last-registration-wins semantics.
 
 Invoke from a shell:
 
 ```sh
 bigband rpc list myplugin
+bigband rpc exec myplugin.add --workspace '<workspace-id>' '{"title":"hi"}'
 bigband rpc exec myplugin.add --instance my-repo/main '{"title":"hi"}'
 ```
 
@@ -310,23 +331,25 @@ echo '{"method":"plugin.rpc.exec","params":{"plugin":"myplugin","method":"add","
 ```
 
 Panels share one WebView per well, so untargeted RPC registration remains
-instance-independent. If a handler's *behavior* needs the caller's instance,
-pass `--instance` and read `payload.instance` off the payload — see the installed
-`~/.bigband/plugins/todos` plugin for a worked example. Targeted registrations are for
-dynamic views: each live view owns its handler and disappears from
-`plugin.rpc.list` when its tab closes.
+workspace-independent. Pass `--workspace` (or `workspace_id` through
+`bigband control plugin.rpc.exec`) when a handler needs an explicit target and
+read `payload.workspace_id`. Genuine project workflows may pass `--instance` and
+read `payload.instance`; standalone folder/scratch workspaces never invent a
+project slug. A stale or closed explicit target must fail rather than fall back
+to the current selection.
 
-## 6. Reacting to selection / instance changes
+## 6. Reacting to workspace selection and changes
 
 - `selection` is a signal containing the complete current selection payload;
   `usePanel()` returns its value and re-runs the component when it changes.
-- Include `instance` in TanStack query keys when a panel's data is
-  instance-scoped, e.g. `['instance', instance, '<resource>', ...]`, so
-  switching instances runs the right fetch. Nothing refetches automatically
-  when the worktree mutates — subscribe with `useHostEvent('instance.changed',
-  …)` and invalidate or refetch only the queries that should react (gitignored
-  paths are filtered before the event fires; see
-  `crates/bigband-core/src/instance_watcher.rs`).
+- Include `workspace.workspace_id` in TanStack query keys for workspace-scoped
+  data, e.g. `['workspace', workspace.workspace_id, '<resource>', ...]`.
+  Subscribe with `useHostEvent('workspace.changed', callback)` and compare the
+  payload's `workspace_id` before invalidating. Ignore rules remain authoritative.
+- `selection.changed` carries the descriptor snapshot plus truthful optional
+  project fields. `agent.status.changed` includes `workspace_id`; project and
+  instance names are present only for real project associations. Bootstrap from
+  the descriptor snapshot, not a cached last filesystem event.
 
 ## 7. Hot reload
 

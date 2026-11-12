@@ -296,14 +296,14 @@ function parseJson<T>(stdout: string, label: string): T {
   }
 }
 
-async function findGitHubReview(instance: string, vcs?: 'git' | 'jj'): Promise<GitHubReview | null> {
-  const ref = vcs === 'jj' ? await nearestBookmark(instance) : null;
+async function findGitHubReview(workspaceId: string, vcs?: 'git' | 'jj'): Promise<GitHubReview | null> {
+  const ref = vcs === 'jj' ? await nearestBookmark(workspaceId) : null;
   const prArgs = ['gh', 'pr', 'view'];
   if (ref) prArgs.push(ref);
   prArgs.push('--json', 'number,headRefOid');
   const [prResult, repoResult] = await Promise.all([
-    exec(instance, prArgs),
-    exec(instance, ['gh', 'repo', 'view', '--json', 'nameWithOwner']),
+    exec(workspaceId, prArgs),
+    exec(workspaceId, ['gh', 'repo', 'view', '--json', 'nameWithOwner']),
   ]);
   if (prResult.exit !== 0 || repoResult.exit !== 0) return null;
   const pr = parseJson<{ number: number; headRefOid: string }>(prResult.stdout, 'gh pr view');
@@ -312,7 +312,7 @@ async function findGitHubReview(instance: string, vcs?: 'git' | 'jj'): Promise<G
   return { ownerRepo: repo.nameWithOwner, number: pr.number, commitId: pr.headRefOid };
 }
 
-async function loadGitHubThreadStates(instance: string, review: GitHubReview) {
+async function loadGitHubThreadStates(workspaceId: string, review: GitHubReview) {
   const separator = review.ownerRepo.indexOf('/');
   if (separator < 1) throw new Error(`Invalid GitHub repository: ${review.ownerRepo}`);
   const owner = review.ownerRepo.slice(0, separator);
@@ -337,7 +337,7 @@ async function loadGitHubThreadStates(instance: string, review: GitHubReview) {
       '-f', `owner=${owner}`, '-f', `name=${name}`, '-F', `number=${review.number}`,
     ];
     if (cursor) args.push('-f', `cursor=${cursor}`);
-    const result = await exec(instance, args);
+    const result = await exec(workspaceId, args);
     if (result.exit !== 0) throw new Error(result.stderr || 'Failed to load GitHub review threads');
     const response = parseJson<{
       data?: { repository?: { pullRequest?: { reviewThreads?: {
@@ -358,14 +358,14 @@ async function loadGitHubThreadStates(instance: string, review: GitHubReview) {
   return states;
 }
 
-async function loadGitHubComments(instance: string, review: GitHubReview): Promise<GitHubComment[]> {
+async function loadGitHubComments(workspaceId: string, review: GitHubReview): Promise<GitHubComment[]> {
   const [result, threadStates] = await Promise.all([
-    exec(instance, [
+    exec(workspaceId, [
       'gh', 'api', '--method', 'GET',
       `repos/${review.ownerRepo}/pulls/${review.number}/comments`,
       '-F', 'per_page=100',
     ]),
-    loadGitHubThreadStates(instance, review),
+    loadGitHubThreadStates(workspaceId, review),
   ]);
   if (result.exit !== 0) throw new Error(result.stderr || 'Failed to load GitHub comments');
   const rows = parseJson<Array<{
@@ -405,7 +405,7 @@ async function loadGitHubComments(instance: string, review: GitHubReview): Promi
 }
 
 async function postGitHubComment(
-  instance: string,
+  workspaceId: string,
   review: GitHubReview,
   anchor: CommentAnchor,
   body: string,
@@ -425,17 +425,17 @@ async function postGitHubComment(
       '-f', `start_side=${anchor.startSide === 'deletions' ? 'LEFT' : 'RIGHT'}`,
     );
   }
-  const result = await exec(instance, args);
+  const result = await exec(workspaceId, args);
   if (result.exit !== 0) throw new Error(result.stderr || 'GitHub rejected the review comment');
 }
 
 async function postGitHubReply(
-  instance: string,
+  workspaceId: string,
   review: GitHubReview,
   commentId: number,
   body: string,
 ): Promise<void> {
-  const result = await exec(instance, [
+  const result = await exec(workspaceId, [
     'gh', 'api', '--method', 'POST',
     `repos/${review.ownerRepo}/pulls/${review.number}/comments/${commentId}/replies`,
     '-f', `body=${body}`,
@@ -443,13 +443,13 @@ async function postGitHubReply(
   if (result.exit !== 0) throw new Error(result.stderr || 'GitHub rejected the review reply');
 }
 
-async function resolveGitHubThread(instance: string, threadId: string): Promise<void> {
+async function resolveGitHubThread(workspaceId: string, threadId: string): Promise<void> {
   const query = `
     mutation($threadId: ID!) {
       resolveReviewThread(input: { threadId: $threadId }) { thread { id isResolved } }
     }
   `;
-  const result = await exec(instance, [
+  const result = await exec(workspaceId, [
     'gh', 'api', 'graphql', '-f', `query=${query}`, '-f', `threadId=${threadId}`,
   ]);
   if (result.exit !== 0) throw new Error(result.stderr || 'GitHub rejected the thread resolution');
@@ -490,7 +490,7 @@ function CommentAnnotationView({ annotation, onDelete }: {
 }
 
 export default function Diff() {
-  const codeViewRef = useRef<CodeViewHandle<CommentAnnotation>>(null);
+  const codeViewRef = useRef<CodeViewHandle<CommentAnnotation, undefined>>(null);
   const bigbandTheme = useTheme();
   const [diffTheme, setDiffTheme] = useState(INITIAL_DIFF_THEME);
   useEffect(() => {
@@ -510,24 +510,43 @@ export default function Diff() {
   const [collapsedFiles, setCollapsedFiles] = useState<Record<string, boolean>>({});
   const [githubComments, setGitHubComments] = useState<GitHubComment[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const instance = context?.instance.slug ?? '';
+  const workspace = context?.workspace ?? null;
+  const workspaceId = workspace?.workspace_id ?? '';
+  const workspaceRoot = workspace?.root ?? '';
+  // Local comment rows stay keyed by the genuine project slug; workspace IDs
+  // target execution, files, and views only.
+  const instance = context?.instance?.slug ?? '';
+  const repositoryBackend = workspace?.repository?.backend;
+  const vcs: 'git' | 'jj' | undefined = arguments_.vcs
+    ?? (repositoryBackend === 'git' || repositoryBackend === 'jj' ? repositoryBackend : undefined);
+  const supported = !!context
+    && !!workspaceId
+    && !!instance
+    && workspace?.capabilities.project === true
+    && !!workspace.project
+    && workspace?.capabilities.repository === true
+    && !!workspace.repository
+    && (vcs === 'git' || vcs === 'jj');
+  const diffArguments: DiffArguments = { ...arguments_, vcs };
 
   async function openInEditor(path: string) {
-    if (!context) return;
+    if (!context || !workspaceId) return;
     setError(null);
     try {
-      await openEditor(path, instance);
+      await openEditor(path, workspaceId);
     } catch (reason: unknown) {
       setError(String(reason instanceof Error ? reason.message : reason));
     }
   }
   const diffQuery = useQuery({
-    queryKey: ['instance', instance, 'diff', arguments_.vcs, arguments_.command?.join('\u0000') ?? '', ignoreWhitespace],
-    enabled: !!context,
+    queryKey: ['workspace', workspaceId, 'diff', vcs, diffArguments.command?.join('\u0000') ?? '', ignoreWhitespace],
+    enabled: supported,
     queryFn: async () => {
-      if (!context) throw new Error('Missing view context');
-      const { stdout, stderr, exit } = await exec(context.instance.slug, diffCommand(arguments_, ignoreWhitespace));
+      if (!supported) throw new Error('Diff requires a genuine project workspace with a repository');
+
+      const { stdout, stderr, exit } = await exec(workspaceId, diffCommand(diffArguments, ignoreWhitespace));
       if (exit !== 0) throw new Error(stderr || `diff exited with status ${exit}`);
+
       return stdout;
     },
     placeholderData: (previous) => previous,
@@ -542,32 +561,32 @@ export default function Diff() {
     { vars: { instance } },
   );
   const visibleError = error ?? commentsError ?? diffError;
-  useHostEvent('instance.changed', (event) => {
-    if (event?.instance !== instance) return;
+  useHostEvent<{ workspace_id?: string }>('workspace.changed', (event) => {
+    if (event?.workspace_id !== workspaceId) return;
     setError(null);
     void diffQuery.refetch();
   }, { debounce: 750 });
 
   useEffect(() => {
     setCollapsedFiles({});
-  }, [instance, arguments_.vcs, arguments_.command?.join('\u0000')]);
+  }, [workspaceId, vcs, diffArguments.command?.join('\u0000')]);
 
   useEffect(() => {
     if (!context) return;
-    registerRPC('refresh_diff', ({ command, vcs }: DiffArguments = {}) => {
+    registerRPC('refresh_diff', ({ command, vcs: requestedVcs }: DiffArguments = {}) => {
       setError(null);
-      setArguments({ command, vcs: vcs ?? context.arguments.vcs });
+      setArguments({ command, vcs: requestedVcs ?? vcs });
       return { ok: true };
     }, context.id);
-  }, [context?.id]);
+  }, [context?.id, vcs]);
 
   async function refreshGitHub() {
-    if (!context) return;
+    if (!supported) return;
     setError(null);
     try {
-      const found = await findGitHubReview(context.instance.slug, arguments_.vcs);
+      const found = await findGitHubReview(workspaceId, vcs);
       setReview(found);
-      setGitHubComments(found ? await loadGitHubComments(context.instance.slug, found) : []);
+      setGitHubComments(found ? await loadGitHubComments(workspaceId, found) : []);
     } catch (reason: unknown) {
       setError(String(reason instanceof Error ? reason.message : reason));
     }
@@ -576,7 +595,7 @@ export default function Diff() {
   useEffect(() => {
     if (patch === null) return;
     void refreshGitHub();
-  }, [context?.id, arguments_.vcs, patch === null]);
+  }, [workspaceId, vcs, patch === null]);
 
   function closeComposer() {
     setAnchor(null);
@@ -584,14 +603,14 @@ export default function Diff() {
   }
 
   async function saveLocal(body: string) {
-    if (!anchor || !context || !body) return;
+    if (!supported || !anchor || !body) return;
     setSaving(true);
     setError(null);
     try {
       await db.query(
         'CREATE diff_comment SET instance = $instance, path = $path, start_side = $startSide, start_line = $startLine, side = $side, line_number = $line, body = $body',
         {
-          instance: context.instance.slug,
+          instance,
           path: anchor.path,
           startSide: anchor.startSide,
           startLine: anchor.startLine,
@@ -613,22 +632,22 @@ export default function Diff() {
   }
 
   async function publishGitHub(body: string) {
-    if (!anchor || !context || !review || !body) return;
+    if (!supported || !anchor || !review || !body) return;
     setSaving(true);
     setError(null);
     try {
-      await postGitHubComment(context.instance.slug, review, anchor, body);
+      await postGitHubComment(workspaceId, review, anchor, body);
       closeComposer();
       await refreshGitHub();
-    } catch (reason: any) {
-      setError(String(reason?.message ?? reason));
+    } catch (reason: unknown) {
+      setError(String(reason instanceof Error ? reason.message : reason));
     } finally {
       setSaving(false);
     }
   }
 
   async function replyLocal(comment: LocalComment, body: string): Promise<boolean> {
-    if (!context || !body) return false;
+    if (!supported || !body) return false;
     const id = String(comment.id);
     setSaving(true);
     setError(null);
@@ -639,7 +658,7 @@ export default function Diff() {
           start_side = $startSide, start_line = $startLine, side = $side,
           line_number = $line, body = $body`,
         {
-          instance: context.instance.slug,
+          instance,
           id,
           path: comment.path,
           startSide: comment.start_side ?? comment.side,
@@ -671,11 +690,11 @@ export default function Diff() {
   }
 
   async function replyGitHubComment(id: number, body: string): Promise<boolean> {
-    if (!context || !review || !body) return false;
+    if (!supported || !review || !body) return false;
     setSaving(true);
     setError(null);
     try {
-      await postGitHubReply(context.instance.slug, review, id, body);
+      await postGitHubReply(workspaceId, review, id, body);
       await refreshGitHub();
       return true;
     } catch (reason: unknown) {
@@ -687,11 +706,11 @@ export default function Diff() {
   }
 
   async function resolveGitHubComment(threadId: string): Promise<void> {
-    if (!context) return;
+    if (!supported) return;
     setSaving(true);
     setError(null);
     try {
-      await resolveGitHubThread(context.instance.slug, threadId);
+      await resolveGitHubThread(workspaceId, threadId);
       await refreshGitHub();
     } catch (reason: unknown) {
       setError(String(reason instanceof Error ? reason.message : reason));
@@ -717,10 +736,10 @@ export default function Diff() {
   );
   const generatedFilePaths = useMemo(() => parsedFiles.map((fileDiff) => fileDiff.name), [parsedFiles]);
   const generatedFilesQuery = useQuery({
-    queryKey: ['instance', instance, 'generated-files', arguments_.vcs, generatedFilePaths],
-    enabled: !!context && generatedFilePaths.length > 0,
+    queryKey: ['workspace', workspaceId, 'generated-files', vcs, generatedFilePaths],
+    enabled: supported && generatedFilePaths.length > 0,
     queryFn: async () => {
-      const result = await exec(instance, ['git', 'check-attr', '-z', 'linguist-generated', '--', ...generatedFilePaths]);
+      const result = await exec(workspaceId, ['git', 'check-attr', '-z', 'linguist-generated', '--', ...generatedFilePaths]);
       return result.exit === 0 ? generatedFilesFromAttributes(result.stdout) : new Set<string>();
     },
   });
@@ -809,7 +828,7 @@ export default function Diff() {
 
 
 
-  const detail = arguments_.command?.join(' ') ?? context?.instance.path ?? 'No instance';
+  const detail = arguments_.command?.join(' ') ?? workspaceRoot ?? 'No workspace';
   const reviewLabel = review === undefined
     ? 'Checking GitHub…'
     : review
@@ -822,6 +841,13 @@ export default function Diff() {
       ...current,
       [item.fileDiff.name]: !item.collapsed,
     }));
+  }
+
+  if (!context) {
+    return <main style={styles.wrap}><div style={styles.message}>Diff requires a plugin view context.</div></main>;
+  }
+  if (!supported) {
+    return <main style={styles.wrap}><div style={styles.message}>Diff requires a genuine project workspace with a detected repository.</div></main>;
   }
 
   return (

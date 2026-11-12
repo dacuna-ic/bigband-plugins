@@ -2,6 +2,7 @@ import type { ThemeTokens } from './theme.ts';
 export type RuntimeConfig = {
     theme?: ThemeTokens;
     db?: BigbandDatabaseConnection | null;
+    execToken?: string;
     selection?: BigbandSelection;
     view?: BigbandViewContext;
     plugin?: string;
