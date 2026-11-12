@@ -1,6 +1,13 @@
 id = "status"
 name = "Status"
 worker = "Worker.ts"
+runtime_api = 2
+
+# Diff comments remain deliberately project-scoped: `diff_comment.instance`
+# stores the genuine `<project>/<instance>` slug, while execution, file, and
+# view targeting use the workspace ID. These requirements keep the plugin out
+# of folder/scratch contexts where that data scope is unavailable.
+requirements = ["project", "repository"]
 
 [[panels]]
 id = "status"
@@ -20,20 +27,20 @@ shortcut = "primary-r"
 
 [[rpc]]
 name = "open_diff"
-description = "open an instance diff — payload: {placement?: 'tab' | 'split-right' | 'split-down', command?: string[]}; command runs as argv in the instance and must emit a git-format patch"
+description = "open a project diff — payload: {workspace_id, placement?: 'tab' | 'split-right' | 'split-down', command?: string[]}; command runs as argv at the workspace root and must emit a git-format patch"
 
 [[rpc]]
 name = "list_comments"
-description = "list saved local diff comment threads for an instance, oldest first, including replies and line ranges — requires --instance <project>/<instance>"
+description = "list saved local diff comment threads for a genuine project instance, oldest first, including replies and line ranges — requires a project instance target (--workspace or --instance <project>/<instance>)"
 
 [[rpc]]
 name = "resolve_comment"
-description = "mark a saved local diff comment resolved — requires --instance <project>/<instance>; payload: {id}"
+description = "mark a saved local diff comment resolved — requires a project instance target (--workspace or --instance <project>/<instance>); payload: {id}"
 
 [[rpc]]
 name = "reply_comment"
-description = "reply to a saved local diff comment — requires --instance <project>/<instance>; payload: {id, body}"
+description = "reply to a saved local diff comment — requires a project instance target (--workspace or --instance <project>/<instance>); payload: {id, body}"
 
 [[rpc]]
 name = "refresh_diff"
-description = "refresh one open diff view — target is the view id; payload: {command?: string[], vcs?: 'git' | 'jj'}"
+description = "register a per-view refresh handler for diff arguments; payload: {command?: string[], vcs?: 'git' | 'jj'}; this build acknowledges view targets but does not implement general targeted RPC routing"

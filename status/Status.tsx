@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Copy, ExternalLink, FileText, GitCompare, RotateCcw } from 'lucide-react';
-import { control, exec, openEditor, openFile, openView } from 'bigband/host';
+import { exec, openEditor, openFile, openView } from 'bigband/host';
 import {
   Button,
   ContextMenu,
@@ -144,32 +144,36 @@ const styles: Record<string, CSSProperties> = {
   empty: { color: 'var(--bb-muted)', fontStyle: 'italic' },
 };
 
-function joinInstancePath(root, relativePath) {
+function joinWorkspacePath(root, relativePath) {
   if (/^(?:[A-Za-z]:[\\/]|[\\/])/.test(relativePath)) return relativePath;
   const separator = root.includes('\\') ? '\\' : '/';
   return `${root.replace(/[\\/]+$/, '')}${separator}${relativePath.replace(/^[/\\]+/, '')}`;
 }
 
-async function findInstancePath(instance) {
-  const response = await control('project.list');
-  for (const project of response?.projects ?? []) {
-    const match = project.instances?.find((candidate) => `${project.name}/${candidate.name}` === instance);
-    if (match?.path) return match.path;
-  }
-  throw new Error(`could not resolve instance path for ${instance}`);
-}
-
 export default function Status() {
-  const { instance, vcs, updateTitle } = usePanel();
+  const { workspace, instance, updateTitle } = usePanel();
+  const workspaceId = workspace?.workspace_id ?? '';
+  const workspaceRoot = workspace?.root ?? '';
+  const instanceSlug = instance ?? '';
+  const vcs = workspace?.repository?.backend;
+  const supported = !!workspaceId
+    && workspace?.capabilities.project === true
+    && !!workspace.project
+    && workspace?.capabilities.repository === true
+    && !!workspace.repository
+    && !!instanceSlug
+    && (vcs === 'git' || vcs === 'jj');
   const [actionError, setActionError] = useState(null);
 
   const statusQ = useQuery({
-    queryKey: ['instance', instance, 'status', vcs],
+    queryKey: ['workspace', workspaceId, 'status', vcs],
     queryFn: async () => {
+      if (!supported) throw new Error('Status requires a genuine project workspace with a repository');
+
       const [statusResult, statResult, conflictsResult] = await Promise.all([
-        exec(instance, statusCommand(vcs)),
-        exec(instance, vcs === 'jj' ? ['jj', 'diff', '--stat'] : ['git', 'diff', 'HEAD', '--stat']),
-        vcs === 'jj' ? exec(instance, ['jj', 'resolve', '--list']) : null,
+        exec(workspaceId, statusCommand(vcs)),
+        exec(workspaceId, vcs === 'jj' ? ['jj', 'diff', '--stat'] : ['git', 'diff', 'HEAD', '--stat']),
+        vcs === 'jj' ? exec(workspaceId, ['jj', 'resolve', '--list']) : null,
       ]);
       if (statusResult.exit !== 0) throw new Error(statusResult.stderr.trim() || `status exited ${statusResult.exit}`);
       if (statResult.exit !== 0) throw new Error(statResult.stderr.trim() || `diff stat exited ${statResult.exit}`);
@@ -186,13 +190,13 @@ export default function Status() {
         ...parseDiffStat(statResult.stdout),
       };
     },
-    enabled: !!instance,
+    enabled: supported,
   });
   const { data: status = { entries: [], additions: 0, deletions: 0 }, isLoading, error, refetch } = statusQ;
   const { entries, additions, deletions } = status;
 
   useEffect(() => {
-    if (!instance || isLoading || error) {
+    if (!supported || isLoading || error) {
       updateTitle(null);
       return;
     }
@@ -202,18 +206,19 @@ export default function Status() {
         <span style={{ color: 'var(--bb-danger)' }}>-{deletions}</span>
       </>,
     );
-  }, [additions, deletions, error, instance, isLoading, updateTitle]);
+  }, [additions, deletions, error, isLoading, supported, updateTitle]);
 
   const openInEditor = async (entry) => {
     setActionError(null);
     try {
-      await openEditor(entry.path);
+      await openEditor(entry.path, workspaceId);
     } catch (reason) {
       setActionError(reason instanceof Error ? reason.message : String(reason));
     }
   };
 
-  useHostEvent('instance.changed', () => {
+  useHostEvent<{ workspace_id?: string }>('workspace.changed', (event) => {
+    if (event?.workspace_id !== workspaceId) return;
     void statusQ.refetch();
   }, { debounce: 750 });
 
@@ -221,13 +226,13 @@ export default function Status() {
     setActionError(null);
     try {
       if (diff) {
-        const { stdout, stderr, exit } = await exec(instance, diffCommand(vcs, entry));
+        const { stdout, stderr, exit } = await exec(workspaceId, diffCommand(vcs, entry));
         if (exit !== 0 && !(vcs === 'git' && entry.status === '?' && exit === 1)) {
           throw new Error(stderr.trim() || `diff exited ${exit}`);
         }
-        await openFile(instance, entry.path, stdout);
+        await openFile(workspaceId, entry.path, stdout);
       } else if (entry.status !== 'D') {
-        await openFile(instance, entry.path, undefined);
+        await openFile(workspaceId, entry.path, undefined);
       }
     } catch (reason) {
       setActionError(reason instanceof Error ? reason.message : String(reason));
@@ -237,9 +242,7 @@ export default function Status() {
   const copyPath = async (entry, absolute) => {
     setActionError(null);
     try {
-      const path = absolute
-        ? joinInstancePath(await findInstancePath(instance), entry.path)
-        : entry.path;
+      const path = absolute ? joinWorkspacePath(workspaceRoot, entry.path) : entry.path;
       if (!navigator.clipboard) throw new Error('clipboard unavailable');
       await navigator.clipboard.writeText(path);
     } catch (reason) {
@@ -250,7 +253,7 @@ export default function Status() {
   const discard = async (entry) => {
     setActionError(null);
     try {
-      const { stderr, exit } = await exec(instance, discardCommand(vcs, entry));
+      const { stderr, exit } = await exec(workspaceId, discardCommand(vcs, entry));
       if (exit !== 0) {
         setActionError(stderr.trim() || `discard exited ${exit}`);
         return;
@@ -260,8 +263,12 @@ export default function Status() {
       setActionError(reason instanceof Error ? reason.message : String(reason));
     }
   };
-  if (!instance) {
-    return <div style={styles.wrap}><div style={styles.empty}>(no instance selected)</div></div>;
+
+  if (!workspace) {
+    return <div style={styles.wrap}><div style={styles.empty}>(select a project workspace)</div></div>;
+  }
+  if (!supported) {
+    return <div style={styles.wrap}><div style={styles.empty}>Status requires a genuine project workspace with a detected repository.</div></div>;
   }
 
   const n = entries.length;
@@ -269,7 +276,7 @@ export default function Status() {
     <div style={styles.wrap}>
       <div style={styles.header}>
         <span style={styles.summary}>{isLoading ? 'loading…' : (n === 1 ? '1 change' : `${n} changes`)}</span>
-        <Button variant="outline" size="sm" onClick={() => openView('status', 'diff', instance, { vcs })}>open diff</Button>
+        <Button variant="outline" size="sm" onClick={() => openView('status', 'diff', workspaceId, { vcs })}>open diff</Button>
       </div>
       {error && <div style={styles.err}>{error.message}</div>}
       {actionError && <div style={styles.err}>{actionError}</div>}

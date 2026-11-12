@@ -1,5 +1,10 @@
 id = "ci"
 name = "CI"
+runtime_api = 2
+
+# CI works against genuine project instances: Buildkite/PR resolution and the
+# shared `pr` rows are project/repository behavior, not folder-workspace data.
+requirements = ["project", "repository"]
 
 # JJ: one CI item per open PR matched by repo + local bookmark within
 # reachable(@, mutable()), the same connected stack used by the Stack panel.
@@ -16,13 +21,13 @@ title = "CI"
 
 [[rpc]]
 name = "failed_job_excerpts"
-description = "return focused excerpts for failed jobs; payload: {pipeline, build_number, max_tokens?}"
+description = "return focused excerpts for failed jobs at a workspace root; payload: {workspace_id, pipeline, build_number, max_tokens?}"
 
 [[rpc]]
 name = "artifact_preview"
-description = "return a bounded tail of a text artifact using authenticated Buildkite access; payload: {pipeline, build_number, artifact_id, max_bytes?}"
+description = "return a bounded tail of a text artifact using authenticated Buildkite access; payload: {workspace_id, pipeline, build_number, artifact_id, max_bytes?}"
 
 
 [[rpc]]
 name = "retry_failed_jobs"
-description = "retry all failed jobs in a build; payload: {pipeline, build_number}"
+description = "retry all failed jobs in a build at a workspace root; payload: {workspace_id, pipeline, build_number}"

@@ -151,26 +151,26 @@ function jobGroup(job) {
   return groupPath(job).join(' / ') || null;
 }
 
-async function currentBranch(instance, vcs) {
-  if (vcs === 'jj') return nearestBookmark(instance);
-  const { stdout } = await exec(instance, ['git', 'branch', '--show-current']);
+async function currentBranch(workspaceId, vcs) {
+  if (vcs === 'jj') return nearestBookmark(workspaceId);
+  const { stdout } = await exec(workspaceId, ['git', 'branch', '--show-current']);
   const branch = stdout.trim();
   // Colocated jj repos leave Git's HEAD detached even when the working copy
   // has a bookmark. Fall back to jj before deciding there is no branch.
-  return branch || nearestBookmark(instance).catch(() => null);
+  return branch || nearestBookmark(workspaceId).catch(() => null);
 }
 
-async function getRemoteUrl(instance, vcs) {
+async function getRemoteUrl(workspaceId, vcs) {
   if (vcs === 'jj') {
-    const { stdout } = await exec(instance, ['jj', 'git', 'remote', 'list']);
+    const { stdout } = await exec(workspaceId, ['jj', 'git', 'remote', 'list']);
     const m = stdout.trim().split('\n')[0]?.match(/^\S+\s+(\S+)/);
     return m?.[1] ?? null;
   }
-  const { stdout, exit } = await exec(instance, ['git', 'remote', 'get-url', 'origin']);
+  const { stdout, exit } = await exec(workspaceId, ['git', 'remote', 'get-url', 'origin']);
   return exit === 0 ? stdout.trim() : null;
 }
 
-async function changedPaths(instance, vcs) {
+async function changedPaths(workspaceId, vcs) {
   const commands = vcs === 'jj'
     ? [['jj', 'diff', '--summary']]
     : [
@@ -180,7 +180,7 @@ async function changedPaths(instance, vcs) {
     ];
   const paths = new Set<string>();
   for (const argv of commands) {
-    const result = await exec(instance, argv).catch(() => null);
+    const result = await exec(workspaceId, argv).catch(() => null);
     if (result?.exit !== 0) continue;
     for (const line of (result.stdout ?? '').split('\n')) {
       const path = vcs === 'jj' ? line.replace(/^\S+\s+/, '').trim() : line.trim();
@@ -190,8 +190,8 @@ async function changedPaths(instance, vcs) {
   return [...paths];
 }
 
-async function pipelineRoots(instance, paths) {
-  const result = await exec(instance, ['git', 'ls-files', '*/.isc/pipeline.yml', '.isc/pipeline.yml']).catch(() => null);
+async function pipelineRoots(workspaceId, paths) {
+  const result = await exec(workspaceId, ['git', 'ls-files', '*/.isc/pipeline.yml', '.isc/pipeline.yml']).catch(() => null);
   if (result?.exit !== 0) return [];
   return (result.stdout ?? '').split('\n')
     .map(file => file.trim().replace(/\/?\.isc\/pipeline\.yml$/, ''))
@@ -205,24 +205,24 @@ function pipelineSlug(build) {
     ?? null;
 }
 
-async function resolvePipelines(instance, vcs, branch) {
-  const cfg = await exec(instance, ['bk', 'config', 'get', 'pipeline']).catch(() => null);
+async function resolvePipelines(workspaceId, vcs, branch) {
+  const cfg = await exec(workspaceId, ['bk', 'config', 'get', 'pipeline']).catch(() => null);
   if (cfg?.stdout?.trim()) return [cfg.stdout.trim()];
 
-  const grep = await exec(instance, ['grep', '-r', '--include=*.toml', '--include=*.yml',
+  const grep = await exec(workspaceId, ['grep', '-r', '--include=*.toml', '--include=*.yml',
     '--include=*.yaml', '--include=*.md', '-m1', 'bigband:pipeline', '.']).catch(() => null);
   if (grep?.stdout) {
     const m = grep.stdout.match(/bigband:pipeline\s+(\S+)/);
     if (m) return [m[1]];
   }
 
-  const remoteUrl = await getRemoteUrl(instance, vcs).catch(() => null);
+  const remoteUrl = await getRemoteUrl(workspaceId, vcs).catch(() => null);
   const repoPath = remoteUrl?.match(/[:/]([^/]+\/[^/.]+?)(?:\.git)?$/)?.[1];
   const repoName = repoPath?.split('/').pop();
   if (!repoPath || !repoName) return [];
 
   if (branch) {
-    const builds = await exec(instance, [
+    const builds = await exec(workspaceId, [
       'bk', 'build', 'list', '--summary', '--json', '--limit', '50', '--branch', branch,
     ]).catch(() => null);
     if (builds?.exit !== 0) {
@@ -239,8 +239,8 @@ async function resolvePipelines(instance, vcs, branch) {
     }
   }
 
-  const paths = await changedPaths(instance, vcs);
-  const roots = await pipelineRoots(instance, paths);
+  const paths = await changedPaths(workspaceId, vcs);
+  const roots = await pipelineRoots(workspaceId, paths);
   const scoredRoots = roots.map((root) => ({
     root,
     score: paths.filter(path => path === root || path.startsWith(`${root}/`)).length,
@@ -249,7 +249,7 @@ async function resolvePipelines(instance, vcs, branch) {
   const pipelines = [];
   for (const { root } of scoredRoots) {
     const slug = `${repoName}-${root.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase()}`;
-    const view = await exec(instance, ['bk', 'pipeline', 'view', slug, '--json']).catch(() => null);
+    const view = await exec(workspaceId, ['bk', 'pipeline', 'view', slug, '--json']).catch(() => null);
     if (view?.exit !== 0) {
       if (NO_AUTH_RE.test(view?.stderr ?? '')) {
         throw Object.assign(new Error('NO_AUTH'), { code: 'no-auth' });
@@ -292,15 +292,15 @@ function ProgressBar({ counts }) {
   );
 }
 
-function JobRow({ job, instance }) {
+function JobRow({ job, workspaceId }) {
   const t = stateTokens(job.state);
   const dur = duration(job.started_at, job.finished_at);
   const open = job.web_url
-    ? () => exec(instance, ['open', job.web_url]).catch(() => exec(instance, ['xdg-open', job.web_url]).catch(() => { }))
+    ? () => exec(workspaceId, ['open', job.web_url]).catch(() => exec(workspaceId, ['xdg-open', job.web_url]).catch(() => { }))
     : null;
   const Icon = STATE_ICON[job.state] ?? Circle;
   const copyMut = useMutation({
-    mutationFn: () => copyJobExcerpt(instance, job),
+    mutationFn: () => copyJobExcerpt(workspaceId, job),
     onSuccess: () => setTimeout(() => copyMut.reset(), 1500),
   });
   const CopyIcon = copyMut.isSuccess ? Check : Copy;
@@ -388,7 +388,7 @@ function shardSummary(jobs) {
   };
 }
 
-function ShardRow({ entry, instance, open, onToggle }) {
+function ShardRow({ entry, workspaceId, open, onToggle }) {
   const s = shardSummary(entry.jobs);
   const t = stateTokens(s.state);
   const done = s.counts.passed + s.counts.failed;
@@ -420,7 +420,7 @@ function ShardRow({ entry, instance, open, onToggle }) {
       </div>
       {open && (
         <div style={{ paddingLeft: '14px' }}>
-          {sorted.map(j => <JobRow key={j.id} job={j} instance={instance} />)}
+          {sorted.map(j => <JobRow key={j.id} job={j} workspaceId={workspaceId} />)}
         </div>
       )}
     </>
@@ -478,11 +478,11 @@ function PlaceholderCard({ children, onRefresh = null }: { children: any; onRefr
 
 // --- query fns (pure async, no hooks) ---
 
-async function fetchContext(instance, vcs) {
-  if (vcs !== 'jj') return { repo: '', bookmarks: [], branch: await currentBranch(instance, vcs) };
+async function fetchContext(workspaceId, vcs) {
+  if (vcs !== 'jj') return { repo: '', bookmarks: [], branch: await currentBranch(workspaceId, vcs) };
   const [remoteUrl, log] = await Promise.all([
-    getRemoteUrl(instance, vcs),
-    exec(instance, ['jj', 'log', '-r', 'reachable(@, mutable())', '--no-graph', '--color', 'never',
+    getRemoteUrl(workspaceId, vcs),
+    exec(workspaceId, ['jj', 'log', '-r', 'reachable(@, mutable())', '--no-graph', '--color', 'never',
       '-T', 'local_bookmarks.map(|b| b.name()).join("\\n") ++ "\\n"']),
   ]);
   if (log.exit !== 0) throw new Error(log.stderr.trim() || `jj exited ${log.exit}`);
@@ -491,11 +491,11 @@ async function fetchContext(instance, vcs) {
   return { repo, bookmarks, branch: null };
 }
 
-async function fetchBuilds(instance, pipelines, branch) {
+async function fetchBuilds(workspaceId, pipelines, branch) {
   const args = ['bk', 'build', 'list', '--summary', '--json', '--limit', '50'];
   if (pipelines.length === 1) args.push('-p', pipelines[0]);
   args.push('--branch', branch);
-  const { stdout, stderr, exit } = await exec(instance, args);
+  const { stdout, stderr, exit } = await exec(workspaceId, args);
   if (exit !== 0) {
     if (NO_AUTH_RE.test(stderr)) throw Object.assign(new Error('NO_AUTH'), { code: 'no-auth' });
     if (NO_PIPELINE_RE.test(stderr)) throw Object.assign(new Error('NO_PIPELINE'), { code: 'no-pipeline' });
@@ -509,8 +509,8 @@ async function fetchBuilds(instance, pipelines, branch) {
   }));
 }
 
-async function retryFailedJobs(instance, pipeline, build) {
-  const { stderr, exit } = await exec(instance, ['bk', 'api', '--method', 'PUT',
+async function retryFailedJobs(workspaceId, pipeline, build) {
+  const { stderr, exit } = await exec(workspaceId, ['bk', 'api', '--method', 'PUT',
     `/pipelines/${pipeline}/builds/${build.number}/retry_failed_jobs`,
   ]);
   if (exit !== 0) {
@@ -545,8 +545,8 @@ function addBuildkiteGroupPaths(build) {
   };
 }
 
-async function fetchBuildDetails(instance, pipeline, buildNumber) {
-  const primary = await exec(instance, ['bk', 'build', 'view', '--json', '-p', pipeline, String(buildNumber)]);
+async function fetchBuildDetails(workspaceId, pipeline, buildNumber) {
+  const primary = await exec(workspaceId, ['bk', 'build', 'view', '--json', '-p', pipeline, String(buildNumber)]);
   if (primary.exit === 0) {
     try {
       return addBuildkiteGroupPaths(JSON.parse(primary.stdout));
@@ -555,7 +555,7 @@ async function fetchBuildDetails(instance, pipeline, buildNumber) {
     }
   }
 
-  const fallback = await exec(instance, ['bk', 'api', `/pipelines/${pipeline}/builds/${buildNumber}`, '--quiet', '--no-pager']);
+  const fallback = await exec(workspaceId, ['bk', 'api', `/pipelines/${pipeline}/builds/${buildNumber}`, '--quiet', '--no-pager']);
   if (fallback.exit === 0) {
     try {
       return addBuildkiteGroupPaths(JSON.parse(fallback.stdout));
@@ -568,8 +568,8 @@ async function fetchBuildDetails(instance, pipeline, buildNumber) {
   throw new Error(detail || `bk build view exited ${primary.exit}`);
 }
 
-async function fetchJobs(instance, pipeline, buildNumber) {
-  const full = await fetchBuildDetails(instance, pipeline, buildNumber);
+async function fetchJobs(workspaceId, pipeline, buildNumber) {
+  const full = await fetchBuildDetails(workspaceId, pipeline, buildNumber);
   return (full.jobs ?? []).filter(isScriptJob);
 }
 
@@ -580,8 +580,8 @@ function trimBuildkiteTrailer(output) {
   return (match ? output.slice(0, match.index) : output).trim();
 }
 
-async function fetchJobExcerpt(instance, job, maxTokens = 1000) {
-  const { stdout, stderr, exit } = await exec(instance, [
+async function fetchJobExcerpt(workspaceId, job, maxTokens = 1000) {
+  const { stdout, stderr, exit } = await exec(workspaceId, [
     'bk', 'job', 'log', job.id,
     '--agent', '--max-tokens', String(maxTokens),
     '--no-timestamps', '--no-pager', '--quiet',
@@ -662,22 +662,22 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
-function rpcCommand(method, instance, payload) {
-  return `bigband rpc exec ci.${method} --instance ${shellQuote(instance)} ${shellQuote(JSON.stringify(payload))}`;
+function rpcCommand(method, workspaceId, payload) {
+  return `bigband rpc exec ci.${method} --workspace ${shellQuote(workspaceId)} ${shellQuote(JSON.stringify(payload))}`;
 }
 
 
 async function rpcFailedJobExcerpts(payload = {}) {
-  const instance = rpcString(payload, 'instance');
+  const workspaceId = rpcString(payload, 'workspace_id');
   const pipeline = rpcString(payload, 'pipeline');
   const buildNumber = rpcBuildNumber(payload);
-  const full = await fetchBuildDetails(instance, pipeline, buildNumber);
+  const full = await fetchBuildDetails(workspaceId, pipeline, buildNumber);
   const jobs = (full.jobs ?? []).filter((job) => isScriptJob(job) && isFailedJob(job));
   const maxTokens = rpcMaxTokens(payload);
   const selected = jobs.slice(0, AI_MAX_LOGGED_FAILED_JOBS);
   const excerpts = await Promise.all(selected.map(async (job) => ({
     job: summarizeJob(job),
-    excerpt: await fetchJobExcerpt(instance, job, maxTokens),
+    excerpt: await fetchJobExcerpt(workspaceId, job, maxTokens),
   })));
   return {
     build_number: buildNumber,
@@ -688,21 +688,21 @@ async function rpcFailedJobExcerpts(payload = {}) {
 }
 
 async function rpcRetryFailedJobs(payload = {}) {
-  const instance = rpcString(payload, 'instance');
+  const workspaceId = rpcString(payload, 'workspace_id');
   const pipeline = rpcString(payload, 'pipeline');
   const buildNumber = rpcBuildNumber(payload);
-  const build = await fetchBuildDetails(instance, pipeline, buildNumber);
-  await retryFailedJobs(instance, pipeline, { ...build, number: build.number ?? buildNumber });
+  const build = await fetchBuildDetails(workspaceId, pipeline, buildNumber);
+  await retryFailedJobs(workspaceId, pipeline, { ...build, number: build.number ?? buildNumber });
   return { pipeline, build_number: buildNumber, status: 'retry_requested' };
 }
 
 
 async function rpcArtifactPreview(payload = {}) {
-  const instance = rpcString(payload, 'instance');
+  const workspaceId = rpcString(payload, 'workspace_id');
   const pipeline = rpcString(payload, 'pipeline');
   const buildNumber = rpcBuildNumber(payload);
   const artifactId = rpcString(payload, 'artifact_id');
-  const full = await fetchBuildDetails(instance, pipeline, buildNumber);
+  const full = await fetchBuildDetails(workspaceId, pipeline, buildNumber);
   const artifact = (full.artifacts ?? []).find((candidate) => candidate.id === artifactId);
   if (!artifact) throw new Error(`artifact '${artifactId}' is not part of ${pipeline} build ${buildNumber}`);
   if (!isTextArtifact(artifact)) throw new Error(`artifact '${artifact.path}' is not a supported text artifact`);
@@ -717,7 +717,7 @@ async function rpcArtifactPreview(payload = {}) {
     `bk artifacts download ${shellQuote(artifact.id)} --build ${buildNumber} -p ${shellQuote(pipeline)} --quiet --no-pager >/dev/null`, 
     `tail -c ${maxBytes} ${shellQuote(artifact.path)}`,
   ].join('; ');
-  const { stdout, stderr, exit } = await exec(instance, ['sh', '-lc', command]);
+  const { stdout, stderr, exit } = await exec(workspaceId, ['sh', '-lc', command]);
   if (exit !== 0) throw new Error(stderr.trim() || `bk artifacts download exited ${exit}`);
   return {
     artifact: {
@@ -737,7 +737,7 @@ registerRPC('artifact_preview', rpcArtifactPreview);
 registerRPC('retry_failed_jobs', rpcRetryFailedJobs);
 
 
-async function sendFailureSummaryToTerminal(instance, pipeline, build, jobs) {
+async function sendFailureSummaryToTerminal(workspaceId, pipeline, build, jobs) {
   const failed = jobs.filter(isFailedJob);
   const lines = [
     `Buildkite build failed: ${pipeline} #${build.number}`,
@@ -756,8 +756,8 @@ async function sendFailureSummaryToTerminal(instance, pipeline, build, jobs) {
     if (job.retries_count) lines.push(`  retries reported: ${job.retries_count}`);
     if (command) lines.push(`  command: ${command.length > 240 ? `${command.slice(0, 237)}...` : command}`);
   }
-  lines.push('All failed excerpts:', rpcCommand('failed_job_excerpts', instance, { pipeline, build_number: build.number, max_tokens: 1000 }));
-  lines.push('Retry failed jobs if the failures look unrelated or flaky:', rpcCommand('retry_failed_jobs', instance, { pipeline, build_number: build.number }));
+  lines.push('All failed excerpts:', rpcCommand('failed_job_excerpts', workspaceId, { pipeline, build_number: build.number, max_tokens: 1000 }));
+  lines.push('Retry failed jobs if the failures look unrelated or flaky:', rpcCommand('retry_failed_jobs', workspaceId, { pipeline, build_number: build.number }));
   await control('terminal.send_text', { text: `${lines.join('\n')}\n` });
 }
 
@@ -771,7 +771,7 @@ function compactCommand(value) {
 }
 
 
-async function createAiFailureSummary(instance, pipeline, build, jobs) {
+async function createAiFailureSummary(workspaceId, pipeline, build, jobs) {
   const failed = jobs.filter(isFailedJob);
   if (!failed.length) throw new Error('No failed CI steps are available to summarize');
 
@@ -790,7 +790,7 @@ async function createAiFailureSummary(instance, pipeline, build, jobs) {
       retries_count: job.retries_count ?? null,
       command: compactCommand(job.command),
     },
-    excerpt: redactBuildkiteUrls(await fetchJobExcerpt(instance, job, logTokens)),
+    excerpt: redactBuildkiteUrls(await fetchJobExcerpt(workspaceId, job, logTokens)),
   })));
   const context = {
     build: {
@@ -845,8 +845,8 @@ async function createAiFailureSummary(instance, pipeline, build, jobs) {
   return raw;
 }
 
-async function sendAiFailureSummaryToTerminal(instance, pipeline, build, jobs) {
-  const summary = await createAiFailureSummary(instance, pipeline, build, jobs);
+async function sendAiFailureSummaryToTerminal(workspaceId, pipeline, build, jobs) {
+  const summary = await createAiFailureSummary(workspaceId, pipeline, build, jobs);
   const failed = jobs.filter(isFailedJob);
   const lines = [
     redactBuildkiteUrls(summary),
@@ -860,29 +860,29 @@ async function sendAiFailureSummaryToTerminal(instance, pipeline, build, jobs) {
     lines.push(`- ${group ? `${group} / ` : ''}${name}${job.step_key ? ` [${job.step_key}]` : ''}${command ? ` — ${command}` : ''}`);
   }
   lines.push('', 'Extra information is available below; use these commands only if needed:');
-  lines.push(rpcCommand('failed_job_excerpts', instance, { pipeline, build_number: build.number, max_tokens: 1000 }));
+  lines.push(rpcCommand('failed_job_excerpts', workspaceId, { pipeline, build_number: build.number, max_tokens: 1000 }));
   lines.push('Preview a text artifact after obtaining its artifact id:');
-  lines.push(rpcCommand('artifact_preview', instance, { pipeline, build_number: build.number, artifact_id: '<artifact-id>', max_bytes: 20_000 }));
+  lines.push(rpcCommand('artifact_preview', workspaceId, { pipeline, build_number: build.number, artifact_id: '<artifact-id>', max_bytes: 20_000 }));
   lines.push('Retry failed jobs if the failures look unrelated or flaky:');
-  lines.push(rpcCommand('retry_failed_jobs', instance, { pipeline, build_number: build.number }));
+  lines.push(rpcCommand('retry_failed_jobs', workspaceId, { pipeline, build_number: build.number }));
   await control('terminal.send_text', { text: `${lines.join('\n')}\n` });
 }
 
-async function copyJobExcerpt(instance, job) {
-  await navigator.clipboard.writeText(await fetchJobExcerpt(instance, job));
+async function copyJobExcerpt(workspaceId, job) {
+  await navigator.clipboard.writeText(await fetchJobExcerpt(workspaceId, job));
 }
 
 // ---
 
-function PipelineCard({ instance, pipeline, build, branch, onRefresh, isFetching }) {
+function PipelineCard({ workspaceId, pipeline, build, branch, onRefresh, isFetching }) {
   const [expanded, setExpanded] = useState(false);
   const [openShards, setOpenShards] = useState<Set<string>>(new Set());
   const needJobs = expanded || build?.state === 'running' || build?.state === 'failed' || build?.state === 'broken';
 
   const jobsQ = useQuery({
-    queryKey: ['instance', instance, 'ci', 'jobs', pipeline, build?.number],
-    queryFn: () => fetchJobs(instance, pipeline, build.number),
-    enabled: !!instance && !!build && needJobs,
+    queryKey: ['workspace', workspaceId, 'ci', 'jobs', pipeline, build?.number],
+    queryFn: () => fetchJobs(workspaceId, pipeline, build.number),
+    enabled: !!workspaceId && !!build && needJobs,
     refetchInterval: (query) => (query.state.data && build?.state === 'running' ? POLL_MS : false),
     gcTime: CACHE_MS,
     refetchOnMount: 'always',
@@ -892,20 +892,20 @@ function PipelineCard({ instance, pipeline, build, branch, onRefresh, isFetching
   const doRefresh = () => { onRefresh(); if (needJobs) jobsQ.refetch(); };
 
   const openInBrowser = async () => {
-    if (!build?.web_url || !instance) return;
-    await exec(instance, ['open', build.web_url]).catch(() => exec(instance, ['xdg-open', build.web_url]).catch(() => { }));
+    if (!build?.web_url || !workspaceId) return;
+    await exec(workspaceId, ['open', build.web_url]).catch(() => exec(workspaceId, ['xdg-open', build.web_url]).catch(() => { }));
   };
 
   const retryMut = useMutation({
-    mutationFn: () => retryFailedJobs(instance, pipeline, build),
+    mutationFn: () => retryFailedJobs(workspaceId, pipeline, build),
     onSuccess: doRefresh,
   });
 
   const sendLogsMut = useMutation({
-    mutationFn: () => sendFailureSummaryToTerminal(instance, pipeline, build, jobs),
+    mutationFn: () => sendFailureSummaryToTerminal(workspaceId, pipeline, build, jobs),
   });
   const sendAiSummaryMut = useMutation({
-    mutationFn: () => sendAiFailureSummaryToTerminal(instance, pipeline, build, jobs),
+    mutationFn: () => sendAiFailureSummaryToTerminal(workspaceId, pipeline, build, jobs),
     onMutate: () => toast('Summarizing CI failure…', { duration: 3000 }),
     onSuccess: () => toast('AI CI summary sent to focused terminal', { duration: 3000 }),
     onError: (cause) => toast(`AI summary failed: ${cause instanceof Error ? cause.message : String(cause)}`, { duration: 5000 }),
@@ -1070,14 +1070,14 @@ function PipelineCard({ instance, pipeline, build, branch, onRefresh, isFetching
                   )}
                   {section.entries.map((entry) => {
                     if (entry.kind === 'single') {
-                      return <JobRow key={entry.job.id} job={entry.job} instance={instance} />;
+                      return <JobRow key={entry.job.id} job={entry.job} workspaceId={workspaceId} />;
                     }
                     const k = `${section.groupKey ?? ''}::${entry.stepKey}`;
                     return (
                       <ShardRow
                         key={k}
                         entry={entry}
-                        instance={instance}
+                        workspaceId={workspaceId}
                         open={openShards.has(k)}
                         onToggle={() => setOpenShards((prev) => {
                           const next = new Set(prev);
@@ -1108,12 +1108,12 @@ function PipelineCard({ instance, pipeline, build, branch, onRefresh, isFetching
   );
 }
 
-function BranchCi({ instance, vcs, branch }) {
+function BranchCi({ workspaceId, vcs, branch }) {
 
   const metaQ = useQuery({
-    queryKey: ['instance', instance, 'ci', 'meta', vcs, branch],
-    queryFn: () => resolvePipelines(instance, vcs, branch),
-    enabled: !!instance,
+    queryKey: ['workspace', workspaceId, 'ci', 'meta', vcs, branch],
+    queryFn: () => resolvePipelines(workspaceId, vcs, branch),
+    enabled: !!workspaceId,
     staleTime: 60_000,
     gcTime: CACHE_MS,
     refetchOnMount: 'always',
@@ -1122,19 +1122,23 @@ function BranchCi({ instance, vcs, branch }) {
   const pipelines = metaQ.data ?? [];
 
   const buildQ = useQuery({
-    queryKey: ['instance', instance, 'ci', 'builds', pipelines, branch],
-    queryFn: () => fetchBuilds(instance, pipelines, branch),
-    enabled: !!instance && pipelines.length > 0 && !!branch,
+    queryKey: ['workspace', workspaceId, 'ci', 'builds', pipelines, branch],
+    queryFn: () => fetchBuilds(workspaceId, pipelines, branch),
+    enabled: !!workspaceId && pipelines.length > 0 && !!branch,
     refetchInterval: POLL_MS,
     gcTime: CACHE_MS,
     refetchOnMount: 'always',
   });
 
-  useHostEvent('instance.changed', () => { metaQ.refetch(); buildQ.refetch(); }, { debounce: 750 });
+  useHostEvent<{ workspace_id?: string }>('workspace.changed', (event) => {
+    if (event?.workspace_id !== workspaceId) return;
+    metaQ.refetch();
+    buildQ.refetch();
+  }, { debounce: 750 });
 
   const builds = buildQ.data ?? [];
 
-  if (!instance) return null;
+  if (!workspaceId) return null;
 
   if (metaQ.isPending) {
     return <PlaceholderCard><span className="bb-pulse" style={{ color: 'var(--bb-muted)', fontSize: '11px' }}>loading…</span></PlaceholderCard>;
@@ -1201,7 +1205,7 @@ function BranchCi({ instance, vcs, branch }) {
       {builds.map(({ pipeline, build }) => (
         <PipelineCard
           key={pipeline}
-          instance={instance}
+          workspaceId={workspaceId}
           pipeline={pipeline}
           build={build}
           branch={branch}
@@ -1214,23 +1218,39 @@ function BranchCi({ instance, vcs, branch }) {
 }
 
 export default function Ci() {
-  const { instance, vcs } = usePanel();
+  const { workspace } = usePanel();
+  const workspaceId = workspace?.workspace_id ?? '';
+  const vcs = workspace?.repository?.backend;
+  const supported = !!workspaceId
+    && workspace?.capabilities.project === true
+    && !!workspace.project
+    && workspace?.capabilities.repository === true
+    && !!workspace.repository
+    && (vcs === 'git' || vcs === 'jj');
   const contextQ = useQuery({
-    queryKey: ['instance', instance, 'ci', 'context', vcs],
-    queryFn: () => fetchContext(instance, vcs),
-    enabled: !!instance,
+    queryKey: ['workspace', workspaceId, 'ci', 'context', vcs],
+    queryFn: () => {
+      if (!supported) throw new Error('CI requires a genuine project workspace with a repository');
+
+      return fetchContext(workspaceId, vcs);
+    },
+    enabled: supported,
     gcTime: CACHE_MS,
     refetchOnMount: 'always',
   });
   const { rows, error } = useCollection<CiPr>(PR, PR_QUERY, {
     vars: { repo: contextQ.data?.repo || '' },
   });
-  useHostEvent('instance.changed', () => { contextQ.refetch(); }, { debounce: 750 });
+  useHostEvent<{ workspace_id?: string }>('workspace.changed', (event) => {
+    if (event?.workspace_id !== workspaceId) return;
+    contextQ.refetch();
+  }, { debounce: 750 });
 
-  if (!instance) return null;
+  if (!workspace) return <PlaceholderCard>Select a project workspace to use CI.</PlaceholderCard>;
+  if (!supported) return <PlaceholderCard>CI requires a genuine project workspace with a detected repository.</PlaceholderCard>;
   if (contextQ.isPending) return <PlaceholderCard>loading…</PlaceholderCard>;
   if (contextQ.isError) return <PlaceholderCard onRefresh={() => contextQ.refetch()}>{contextQ.error.message}</PlaceholderCard>;
-  if (vcs !== 'jj') return <BranchCi instance={instance} vcs={vcs} branch={contextQ.data.branch} />;
+  if (vcs !== 'jj') return <BranchCi workspaceId={workspaceId} vcs={vcs} branch={contextQ.data.branch} />;
   if (error) return <PlaceholderCard>{error}</PlaceholderCard>;
   if (!rows) return <PlaceholderCard>loading PRs…</PlaceholderCard>;
 
@@ -1251,7 +1271,7 @@ export default function Ci() {
               </Badge>
             </div>
           </div>
-          <BranchCi instance={instance} vcs={vcs} branch={pr.head_ref} />
+          <BranchCi workspaceId={workspaceId} vcs={vcs} branch={pr.head_ref} />
         </section>
       ))}
     </div>

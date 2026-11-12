@@ -1,5 +1,5 @@
 import { db, migrate } from 'bigband/db';
-import { exec, onLifecycleEvent, openView, registerRPC } from 'bigband/host';
+import { openView, registerRPC, workspaces } from 'bigband/host';
 import type { ViewPlacement } from 'bigband/host';
 
 await migrate('status', [{
@@ -31,22 +31,34 @@ await migrate('status', [{
 }]);
 
 interface OpenDiffArgs {
-  instance?: string;
+  workspace_id?: string;
   placement?: ViewPlacement;
   vcs?: 'git' | 'jj';
   command?: string[];
 }
 
-async function openDiff({ instance, placement = 'tab', vcs, command }: OpenDiffArgs = {}) {
-  if (!instance) throw new Error('status.open_diff requires an instance');
+async function openDiff({ workspace_id, placement = 'tab', vcs, command }: OpenDiffArgs = {}) {
+  const workspaceId = String(workspace_id ?? '').trim();
+  if (!workspaceId) throw new Error("status.open_diff: missing 'workspace_id'");
   if (command !== undefined && (!Array.isArray(command) || command.length === 0 || command.some((arg) => typeof arg !== 'string'))) {
     throw new Error('status.open_diff command must be a non-empty string array');
   }
-  if (command === undefined && vcs !== 'git' && vcs !== 'jj') {
-    const probe = await exec(instance, ['jj', 'root']);
-    vcs = probe.exit === 0 ? 'jj' : 'git';
+
+  const workspace = (await workspaces()).find((candidate) => candidate.workspace_id === workspaceId);
+  if (!workspace?.project || !workspace.repository) {
+    throw new Error('status.open_diff requires an open project workspace with a repository');
   }
-  return openView('status', 'diff', instance, { vcs, command }, placement);
+
+  if (command === undefined && vcs !== 'git' && vcs !== 'jj') {
+    const backend = workspace.repository.backend;
+    if (backend !== 'git' && backend !== 'jj') {
+      throw new Error(`status.open_diff does not support repository backend ${backend}`);
+    }
+
+    vcs = backend;
+  }
+
+  return openView('status', 'diff', workspaceId, { vcs, command }, placement);
 }
 
 interface CommentRpcArgs {
@@ -159,13 +171,10 @@ async function replyComment({ instance, id, body }: CommentRpcArgs = {}) {
   if (!reply) throw new Error('status.reply_comment: reply was not created');
   return serializeReply(reply);
 }
-onLifecycleEvent('instance.removed', async ({ instance }) => {
-  const instanceSlug = String(instance ?? '').trim();
-  if (!instanceSlug) throw new Error("status instance.removed: missing 'instance'");
-  await db.query('DELETE diff_comment WHERE instance = $instance', { instance: instanceSlug });
-});
 
-
+// Comments are deliberately scoped to a genuine project-instance slug. Keeping
+// the existing `instance` field preserves every saved row without a data
+// migration; workspace IDs are used only for execution and view targeting.
 registerRPC('open_diff', openDiff);
 registerRPC('list_comments', listComments);
 registerRPC('resolve_comment', resolveComment);
